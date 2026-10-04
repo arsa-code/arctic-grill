@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Арктик Гриль</title>
+<style>
+* { box-sizing: border-box; }
+html, body {
+    margin: 0;
+    padding: 0;
+    width: 100%;
+    background: #fff;
+}
+body {
+    overflow-x: hidden;
+}
+#pdf-container {
+    width: 100%;
+    display: flex;
+    flex-direction: column;
+}
+/* Placeholder keeps the page's exact height before it is rendered,
+   so scrolling doesn't jump while pages load. */
+.page {
+    position: relative;
+    width: 100%;
+    background: #f2f2f2;
+}
+.page canvas {
+    display: block;
+    width: 100%;
+    height: 100%;
+}
+.page.rendered {
+    background: #fff;
+}
+#loader {
+    position: fixed;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: #fff;
+    z-index: 10;
+    transition: opacity .3s;
+}
+#loader.hidden {
+    opacity: 0;
+    pointer-events: none;
+}
+.spinner {
+    width: 40px;
+    height: 40px;
+    border: 3px solid #ddd;
+    border-top-color: #333;
+    border-radius: 50%;
+    animation: spin 1s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+<div id="loader"><div class="spinner"></div></div>
+<div id="pdf-container"></div>
+
+<script type="module">
+import * as pdfjsLib from "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/5.4.149/pdf.min.mjs";
+
+pdfjsLib.GlobalWorkerOptions.workerSrc =
+    "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/5.4.149/pdf.worker.min.mjs";
+
+// Relative path so the site also works when hosted in a subfolder.
+const url = "presentation.pdf";
+const container = document.getElementById("pdf-container");
+const loader = document.getElementById("loader");
+
+// Stream the PDF in chunks (HTTP range requests) instead of
+// downloading the whole file before showing anything.
+const pdf = await pdfjsLib.getDocument({
+    url,
+    disableAutoFetch: true,
+    disableStream: false,
+    rangeChunkSize: 1024 * 1024
+}).promise;
+
+const pages = [];
+
+function pageWidth() {
+    // clientWidth excludes the vertical scrollbar, so no horizontal scroll.
+    return document.documentElement.clientWidth;
+}
+
+// 1. Create sized placeholders for every page.
+for (let i = 1; i <= pdf.numPages; i++) {
+    const page = await pdf.getPage(i);
+    const vp = page.getViewport({ scale: 1 });
+
+    const el = document.createElement("div");
+    el.className = "page";
+    el.style.aspectRatio = `${vp.width} / ${vp.height}`;
+    el.dataset.index = pages.length;
+    container.appendChild(el);
+
+    pages.push({ page, el, renderedWidth: 0, task: null });
+}
+
+loader.classList.add("hidden");
+
+// 2. Render a page only when it gets close to the viewport.
+async function render(item) {
+    const width = pageWidth();
+    if (item.renderedWidth === width) return;
+    if (item.task) item.task.cancel();
+
+    const base = item.page.getViewport({ scale: 1 });
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const viewport = item.page.getViewport({ scale: (width / base.width) * dpr });
+
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.ceil(viewport.width);
+    canvas.height = Math.ceil(viewport.height);
+    const ctx = canvas.getContext("2d", { alpha: false });
+
+    item.task = item.page.render({ canvasContext: ctx, viewport });
+    try {
+        await item.task.promise;
+    } catch (e) {
+        if (e?.name === "RenderingCancelledException") return;
+        throw e;
+    } finally {
+        item.task = null;
+    }
+
+    item.el.replaceChildren(canvas);
+    item.el.classList.add("rendered");
+    item.renderedWidth = width;
+}
+
+const visible = new Set();
+const observer = new IntersectionObserver((entries) => {
+    for (const entry of entries) {
+        const item = pages[entry.target.dataset.index];
+        if (entry.isIntersecting) {
+            visible.add(item);
+            render(item);
+        } else {
+            visible.delete(item);
+        }
+    }
+}, { rootMargin: "150% 0px" });
+
+pages.forEach((p) => observer.observe(p.el));
+
+// 3. Re-render nearby pages sharply after the window width changes.
+let resizeTimer;
+let lastWidth = pageWidth();
+window.addEventListener("resize", () => {
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(() => {
+        if (pageWidth() === lastWidth) return; // ignore mobile URL-bar height changes
+        lastWidth = pageWidth();
+        visible.forEach(render);
+    }, 200);
+});
+</script>
+</body>
+</html>
